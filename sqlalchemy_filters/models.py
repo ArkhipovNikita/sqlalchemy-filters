@@ -58,6 +58,10 @@ def _is_hybrid_method(orm_descriptor):
     return orm_descriptor.extension_type == symbol('HYBRID_METHOD')
 
 
+def _is_select(query):
+    return hasattr(query, 'is_select') and query.is_select
+
+
 def get_model_from_table(table):  # pragma: nocover
     """Resolve model class from table object"""
 
@@ -68,11 +72,32 @@ def get_model_from_table(table):  # pragma: nocover
     return None
 
 
+def _get_query_models_from_internals(query):
+    """
+    Gets the models from various internals.
+
+    :param query:
+        A :class:`sqlalchemy.orm.Query` or `sqlalchemy.sql.Select` instance.
+
+    :returns:
+        A list with all the models included in the query
+        got from the internals.
+    """
+    models = []
+
+    for table_tuple in query._setup_joins + query._legacy_setup_joins:
+        model_class = get_model_from_table(table_tuple[0])
+        if model_class:
+            models.append(model_class)
+
+    return models
+
+
 def get_query_models(query):
     """Get models from query.
 
     :param query:
-        A :class:`sqlalchemy.orm.Query` instance.
+        A :class:`sqlalchemy.orm.Query` or `sqlalchemy.sql.Select` instance.
 
     :returns:
         A dictionary with all the models included in the query.
@@ -83,19 +108,18 @@ def get_query_models(query):
     if sqlalchemy_version_lt('1.4'):  # pragma: nocover
         models.extend(mapper.class_ for mapper in query._join_entities)
     else:  # pragma: nocover
-        try:
-            models.extend(
-                mapper.class_
-                for mapper
-                in query._compile_state()._join_entities
-            )
-        except InvalidRequestError:
-            # query might not contain columns yet, hence cannot be compiled
-            # try to infer the models from various internals
-            for table_tuple in query._setup_joins + query._legacy_setup_joins:
-                model_class = get_model_from_table(table_tuple[0])
-                if model_class:
-                    models.append(model_class)
+        if not _is_select(query):
+            try:
+                models.extend(
+                    mapper.class_
+                    for mapper
+                    in query._compile_state()._join_entities
+                )
+            except InvalidRequestError:
+                # query might not contain columns yet, hence cannot be compiled
+                models.extend(_get_query_models_from_internals(query))
+        else:
+            models.extend(_get_query_models_from_internals(query))
 
     # account also query.select_from entities
     model_class = None
@@ -206,7 +230,10 @@ def auto_join(query, *model_names):
                     # Many Core and ORM statement objects now perform much of
                     # their construction and validation in the compile phase
                     tmp = query.join(model)
-                    tmp._compile_state()
+
+                    if not _is_select(query):
+                        tmp._compile_state()
+
                     query = tmp
             except InvalidRequestError:
                 pass  # can't be autojoined
